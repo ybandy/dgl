@@ -1,3 +1,7 @@
+Forked and modified to be used from [CHI-GNN](https://github.com/ybandy/chignn).
+
+---
+
 <p align="center">
   <img src="http://data.dgl.ai/asset/logo.jpg" height="200">
 </p>
