@@ -1,4 +1,5 @@
 /**
+ *  Copyright (c) 2026 Kioxia Corporation.
  *  Copyright (c) 2023 by Contributors
  * @file graphbolt/fused_csc_sampling_graph.h
  * @brief Header file of csc sampling graph.

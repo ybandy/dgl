@@ -1,4 +1,5 @@
 /**
+ *  Copyright (c) 2026 Kioxia Corporation.
  *  Copyright (c) 2023 by Contributors
  * @file concurrent_id_hash_map.cc
  * @brief Class about id hash map.

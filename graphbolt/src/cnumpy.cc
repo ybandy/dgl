@@ -1,4 +1,5 @@
 /**
+ *  Copyright (c) 2026 Kioxia Corporation.
  *  Copyright (c) 2024, GT-TDAlab (Muhammed Fatih Balin & Umit V. Catalyurek)
  *  Copyright (c) 2023 by Contributors
  * @file cnumpy.cc

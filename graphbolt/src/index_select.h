@@ -1,4 +1,5 @@
 /**
+ *  Copyright (c) 2026 Kioxia Corporation.
  *  Copyright (c) 2023 by Contributors
  * @file index_select.h
  * @brief Index select operators.
