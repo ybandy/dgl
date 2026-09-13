@@ -93,6 +93,36 @@ if(USE_OPENMP)
   message(STATUS "Build graphbolt with OpenMP.")
 endif(USE_OPENMP)
 
+set(SPDK_INCLUDE "${CMAKE_CURRENT_SOURCE_DIR}/../../spdk/include")
+set(SPDK_LIB "${CMAKE_CURRENT_SOURCE_DIR}/../../spdk_lib")
+set(ISAL_LIB "${CMAKE_CURRENT_SOURCE_DIR}/../../spdk/isa-l/.libs/libisal.a")
+
+target_include_directories(${LIB_GRAPHBOLT_NAME} PRIVATE ${SPDK_INCLUDE})
+add_library(spdk_lib STATIC IMPORTED)
+set_target_properties(spdk_lib PROPERTIES IMPORTED_LOCATION ${SPDK_LIB}/libspdk.a)
+target_link_libraries(${LIB_GRAPHBOLT_NAME} "$<LINK_LIBRARY:WHOLE_ARCHIVE,spdk_lib>")
+
+add_library(dpdk_lib STATIC IMPORTED)
+set_target_properties(dpdk_lib PROPERTIES IMPORTED_LOCATION ${SPDK_LIB}/libdpdk.a)
+target_link_libraries(${LIB_GRAPHBOLT_NAME} dpdk_lib)
+
+add_library(isal_lib STATIC IMPORTED)
+set_target_properties(isal_lib PROPERTIES IMPORTED_LOCATION ${ISAL_LIB})
+target_link_libraries(${LIB_GRAPHBOLT_NAME} isal_lib)
+
+find_package(OpenSSL)
+target_link_libraries(${LIB_GRAPHBOLT_NAME} OpenSSL::SSL)
+target_link_libraries(${LIB_GRAPHBOLT_NAME} OpenSSL::Crypto)
+
+add_library(numa_lib SHARED IMPORTED)
+set_target_properties(numa_lib PROPERTIES IMPORTED_LOCATION "/usr/lib/x86_64-linux-gnu/libnuma.so")
+target_link_libraries(${LIB_GRAPHBOLT_NAME} numa_lib)
+
+add_library(uuid_lib SHARED IMPORTED)
+set_target_properties(uuid_lib PROPERTIES IMPORTED_LOCATION "/usr/lib/x86_64-linux-gnu/libuuid.so")
+target_link_libraries(${LIB_GRAPHBOLT_NAME} uuid_lib)
+
+
 if(CMAKE_SYSTEM_NAME MATCHES "Linux")
   if(USE_LIBURING)
     add_definitions(-DHAVE_LIBRARY_LIBURING)

@@ -286,6 +286,9 @@ class ItemSampler(IterDataPipe):
         drop_last: Optional[bool] = False,
         shuffle: Optional[bool] = False,
         seed: Optional[int] = None,
+        assign_minibatch_idx: Optional[bool] = False,
+        num_threads: Optional[int] = None,
+        pin_memory: Optional[bool] = False,
     ) -> None:
         super().__init__()
         self._item_set = item_set
@@ -294,6 +297,9 @@ class ItemSampler(IterDataPipe):
         self._minibatcher = minibatcher
         self._drop_last = drop_last
         self._shuffle = shuffle
+        self._assign_minibatch_idx = assign_minibatch_idx
+        self._num_threads = num_threads
+        self._pin_memory = pin_memory
         self._distributed = False
         self._drop_uneven_inputs = False
         self._world_size = None
@@ -335,16 +341,28 @@ class ItemSampler(IterDataPipe):
             indices = permutation[start_offset : start_offset + assigned_count]
         else:
             indices = torch.arange(start_offset, start_offset + assigned_count)
+        if(self._num_threads is not None):
+            torch.set_num_threads(self._num_threads)
+        minibatch_idx = 0
         for i in range(0, assigned_count, self._batch_size):
             if output_count <= 0:
                 break
-            yield self._minibatcher(
+            #yield self._minibatcher(
+            minibatch = self._minibatcher(
                 self._item_set[
                     indices[i : i + min(self._batch_size, output_count)]
                 ],
                 self._names,
             )
+            if(self._assign_minibatch_idx):
+                minibatch.minibatch_idx = minibatch_idx
+            else:
+                minibatch.minibatch_idx = -1
+            if(self._pin_memory):
+                minibatch = minibatch.pin_memory()
+            yield minibatch
             output_count -= self._batch_size
+            minibatch_idx += 1
 
         self._epoch += 1
 

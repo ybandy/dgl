@@ -22,8 +22,8 @@ from ..minibatch_transformer import MiniBatchTransformer
 
 from ..subgraph_sampler import all_to_all, revert_to_homo, SubgraphSampler
 from .fused_csc_sampling_graph import fused_csc_sampling_graph
-from .sampled_subgraph_impl import SampledSubgraphImpl
-
+from .sampled_subgraph_impl import SampledSubgraphImpl, CSCFormatBase
+from ..timing_utils import TimingReporter
 
 __all__ = [
     "NeighborSampler",
@@ -266,6 +266,9 @@ class SamplePerLayer(MiniBatchTransformer):
         prob_name,
         overlap_fetch,
         asynchronous=False,
+        reporter=None,
+        pin_memory=False,
+        return_picked_eids=True,
     ):
         graph = sampler.__self__
         self.returning_indices_and_original_edge_ids_are_optional = False
@@ -330,8 +333,13 @@ class SamplePerLayer(MiniBatchTransformer):
         self.prob_name = prob_name
         self.overlap_fetch = overlap_fetch
         self.asynchronous = asynchronous
+        self.reporter = reporter
+        self.pin_memory = pin_memory
+        self.return_picked_eids = return_picked_eids
 
     def _sample_per_layer(self, minibatch):
+        if(self.reporter is not None):
+            self.reporter.report_time('start', minibatch.minibatch_idx)
         kwargs = {
             key[1:]: getattr(minibatch, key)
             for key in ["_random_seed", "_seed2_contribution"]
@@ -344,9 +352,13 @@ class SamplePerLayer(MiniBatchTransformer):
             self.prob_name,
             self.returning_indices_and_original_edge_ids_are_optional,
             async_op=self.asynchronous,
+            pin_memory=self.pin_memory,
+            return_picked_eids=self.return_picked_eids,
             **kwargs,
         )
         minibatch.sampled_subgraphs.insert(0, subgraph)
+        if(self.reporter is not None):
+            self.reporter.report_time('end', minibatch.minibatch_idx)
         return minibatch
 
     def _sample_per_layer_from_fetched_subgraph(self, minibatch):
@@ -461,10 +473,17 @@ class CompactPerLayer(MiniBatchTransformer):
     """Compact the sampled edges for a single layer."""
 
     def __init__(
-        self, datapipe, deduplicate, cooperative=False, asynchronous=False
+        self, datapipe, deduplicate, cooperative=False, asynchronous=False,
+        num_layers=None, layer_idx=None, reporter=None, pin_memory=False,
+        return_picked_eids=True,
     ):
         self.deduplicate = deduplicate
         self.cooperative = cooperative
+        self.num_layers = num_layers
+        self.layer_idx = layer_idx
+        self.reporter = reporter
+        self.pin_memory = pin_memory
+        self.return_picked_eids = return_picked_eids
         if asynchronous and deduplicate:
             datapipe = datapipe.transform(self._compact_per_layer_async)
             datapipe = datapipe.buffer()
@@ -492,12 +511,18 @@ class CompactPerLayer(MiniBatchTransformer):
     def _compact_per_layer(self, minibatch):
         subgraph = minibatch.sampled_subgraphs[0]
         seeds = minibatch._seed_nodes
+        if(self.reporter is not None):
+            self.reporter.report_time('start', minibatch.minibatch_idx)
         if self.deduplicate:
             (
                 original_row_node_ids,
                 compacted_csc_format,
                 _,
-            ) = unique_and_compact_csc_formats(subgraph.sampled_csc, seeds)
+            ) = unique_and_compact_csc_formats(subgraph.sampled_csc, seeds,
+                                               minibatch_idx=minibatch.minibatch_idx,
+                                               num_layers=self.num_layers,
+                                               layer_idx=self.layer_idx,
+                                               pin_memory=self.pin_memory)
             subgraph = SampledSubgraphImpl(
                 sampled_csc=compacted_csc_format,
                 original_column_node_ids=seeds,
@@ -516,7 +541,11 @@ class CompactPerLayer(MiniBatchTransformer):
                 original_edge_ids=subgraph.original_edge_ids,
             )
         minibatch._seed_nodes = original_row_node_ids
+        if(not self.return_picked_eids):
+            delattr(subgraph, "original_edge_ids")
         minibatch.sampled_subgraphs[0] = subgraph
+        if(self.reporter is not None):
+            self.reporter.report_time('end', minibatch.minibatch_idx)
         return minibatch
 
     def _compact_per_layer_async(self, minibatch):
@@ -637,6 +666,122 @@ class CompactPerLayer(MiniBatchTransformer):
         return minibatch
 
 
+@functional_datapipe("sample_and_compact_per_layer")
+class SampleAndCompactPerLayer(MiniBatchTransformer):
+
+    def __init__(
+        self,
+        datapipe,
+        sampler,
+        fanout,
+        pin_memory=False,
+        return_picked_eids=True,
+    ):
+        datapipe = datapipe.transform(self._sample_and_compact_per_layer)
+        super().__init__(datapipe)
+        self.sampler = sampler
+        self.fanout = fanout
+        self.pin_memory = pin_memory
+        self.return_picked_eids = return_picked_eids
+
+    def _sample_and_compact_per_layer(self, minibatch):
+        seeds = minibatch._seed_nodes
+        (
+            original_edge_ids,
+            original_row_node_ids,
+            compacted_csc_format,
+        ) = self.sampler(seeds,
+                         self.fanout,
+                         self.pin_memory,
+                         self.return_picked_eids)
+        subgraph = SampledSubgraphImpl(
+            sampled_csc=compacted_csc_format,
+            original_column_node_ids=seeds,
+            original_row_node_ids=original_row_node_ids,
+            original_edge_ids=original_edge_ids,
+        )
+        if(not self.return_picked_eids):
+            delattr(subgraph, "original_edge_ids")
+        minibatch._seed_nodes = original_row_node_ids
+        minibatch.sampled_subgraphs.insert(0, subgraph)
+        return minibatch
+
+
+@functional_datapipe("sample_and_compact_all_layers")
+class SampleAndCompactAllLayers(MiniBatchTransformer):
+
+    def __init__(
+        self,
+        datapipe,
+        sampler,
+        fanouts, # list of int as opposed to fanout: int as in other classes
+        pin_memory=False,
+        return_picked_eids=True,
+        num_sampling_buffers=0,
+    ):
+        if(num_sampling_buffers > 0):
+            datapipe = datapipe.transform(self._sample_and_compact_all_layers_async)
+            datapipe = datapipe.buffer(num_sampling_buffers)
+            datapipe = datapipe.transform(self._sample_and_compact_all_layers_wait_future)
+        else:
+            datapipe = datapipe.transform(self._sample_and_compact_all_layers)
+        super().__init__(datapipe)
+        self.sampler = sampler
+        self.fanouts = fanouts
+        self.pin_memory = pin_memory
+        self.return_picked_eids = return_picked_eids
+
+    def _sample_and_compact_all_layers(self, minibatch):
+        ret = self.sampler(minibatch._seed_nodes,
+                           self.fanouts,
+                           self.pin_memory,
+                           self.return_picked_eids,
+                           asynchronous=False)
+        self._convert(ret, minibatch, self.return_picked_eids)
+        return minibatch
+
+    def _sample_and_compact_all_layers_async(self, minibatch):
+        ret = self.sampler(minibatch._seed_nodes,
+                           self.fanouts,
+                           self.pin_memory,
+                           self.return_picked_eids,
+                           asynchronous=True)
+        minibatch._sampling_results_future = ret
+        return minibatch
+
+    def _sample_and_compact_all_layers_wait_future(self, minibatch):
+        ret = minibatch._sampling_results_future.wait()
+        self._convert(ret, minibatch, self.return_picked_eids)
+        delattr(minibatch, "_sampling_results_future")
+        return minibatch
+
+    @staticmethod
+    def _convert(sampling_results, minibatch, return_picked_eids):
+        seeds = minibatch._seed_nodes
+        for item in sampling_results:
+            (
+                indptr,
+                original_edge_ids,
+                unique_nodes,
+                compacted_indices
+            ) = item
+            compacted_csc_format = CSCFormatBase(
+                indptr=indptr,
+                indices=compacted_indices
+            )
+            subgraph = SampledSubgraphImpl(
+                sampled_csc=compacted_csc_format,
+                original_column_node_ids=seeds,
+                original_row_node_ids=unique_nodes,
+                original_edge_ids=original_edge_ids,
+            )
+            if(not return_picked_eids):
+                delattr(subgraph, "original_edge_ids")
+            minibatch.sampled_subgraphs.insert(0, subgraph)
+            seeds = unique_nodes
+        minibatch._seed_nodes = seeds
+
+
 class NeighborSamplerImpl(SubgraphSampler):
     # pylint: disable=abstract-method
     """Base class for NeighborSamplers."""
@@ -658,7 +803,17 @@ class NeighborSamplerImpl(SubgraphSampler):
         asynchronous,
         layer_dependency=None,
         batch_dependency=None,
+        num_minibatches=None,
+        num_workers=None,
+        pin_memory=False,
+        return_picked_eids=True,
+        num_sampling_buffers=0,
     ):
+        self.num_minibatches = num_minibatches
+        self.num_workers = num_workers
+        self.pin_memory = pin_memory
+        self.return_picked_eids = return_picked_eids
+        self.num_sampling_buffers = num_sampling_buffers
         if overlap_fetch and num_gpu_cached_edges > 0:
             if graph._gpu_graph_cache is None:
                 graph._initialize_gpu_graph_cache(
@@ -762,15 +917,40 @@ class NeighborSamplerImpl(SubgraphSampler):
         is_labor = sampler.__name__ == "sample_layer_neighbors"
         if is_labor:
             datapipe = datapipe.transform(self._set_seed)
-        for fanout in reversed(fanouts):
+        if (self.num_minibatches is None) or (self.num_workers is None):
+            sample_time_reporter = None
+            compact_time_reporter = None
+        else:
+            sample_time_reporter = TimingReporter('sample_per_layer', self.num_minibatches, self.num_workers)
+            compact_time_reporter = TimingReporter('compact_per_layer', self.num_minibatches, self.num_workers)
+
+        if(sampler.__name__ == "sample_neighbors_all"):
+            print("sample_and_compact_all_layers")
+            datapipe = datapipe.sample_and_compact_all_layers(
+                sampler, fanouts, self.pin_memory, self.return_picked_eids, self.num_sampling_buffers
+            )
+            return datapipe.transform(self._set_input_nodes)
+
+        for layer_idx, fanout in enumerate(reversed(fanouts)):
             # Convert fanout to tensor.
             if not isinstance(fanout, torch.Tensor):
                 fanout = torch.LongTensor([int(fanout)])
+            if(sampler.__name__ == 'sample_neighbors_and_compact'):
+                print("sample_and_compact_per_layer")
+                datapipe = datapipe.sample_and_compact_per_layer(sampler, fanout, self.pin_memory, self.return_picked_eids)
+                continue
             datapipe = datapipe.sample_per_layer(
-                sampler, fanout, replace, prob_name, overlap_fetch, asynchronous
+                sampler, fanout, replace, prob_name, overlap_fetch, asynchronous,
+                sample_time_reporter,
+                pin_memory=self.pin_memory,
+                return_picked_eids=self.return_picked_eids,
             )
             datapipe = datapipe.compact_per_layer(
-                deduplicate, cooperative, asynchronous
+                deduplicate, cooperative, asynchronous,
+                len(fanouts), layer_idx,
+                compact_time_reporter,
+                pin_memory=self.pin_memory,
+                return_picked_eids=self.return_picked_eids,
             )
             if is_labor and not layer_dependency:
                 datapipe = datapipe.transform(self._increment_seed)
@@ -905,7 +1085,23 @@ class NeighborSampler(NeighborSamplerImpl):
         gpu_cache_threshold=1,
         cooperative=False,
         asynchronous=False,
+        num_minibatches=None,
+        num_workers=None,
+        pin_memory=False,
+        return_picked_eids=True,
+        sample_mode=None,
+        num_sampling_buffers=0,
     ):
+        if(sample_mode == "sample_neighbors_and_compact"):
+            print("using sample_neighbors_and_compact as the sampler")
+            sampler = graph.sample_neighbors_and_compact
+        elif(sample_mode == "sample_neighbors_all"):
+            print("using sample_neighbors_all as the sampler")
+            sampler = graph.sample_neighbors_all
+        else: # default (original implementation)
+            print("using sample_neighbors as the sampler")
+            sampler = graph.sample_neighbors
+
         super().__init__(
             datapipe,
             graph,
@@ -913,12 +1109,17 @@ class NeighborSampler(NeighborSamplerImpl):
             replace,
             prob_name,
             deduplicate,
-            graph.sample_neighbors,
+            sampler,
             overlap_fetch,
             num_gpu_cached_edges,
             gpu_cache_threshold,
             cooperative,
             asynchronous,
+            num_minibatches=num_minibatches,
+            num_workers=num_workers,
+            pin_memory=pin_memory,
+            return_picked_eids=return_picked_eids,
+            num_sampling_buffers=num_sampling_buffers
         )
 
 

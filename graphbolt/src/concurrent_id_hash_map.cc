@@ -5,6 +5,7 @@
  */
 
 #include "concurrent_id_hash_map.h"
+#include <graphbolt/async.h>
 
 #ifdef _MSC_VER
 #include <intrin.h>
@@ -95,12 +96,126 @@ ConcurrentIdHashMap<IdType>::ConcurrentIdHashMap(
 }
 
 template <typename IdType>
+const torch::Tensor& ConcurrentIdHashMap<IdType>::ConstructHashMap(
+    const torch::Tensor& ids, size_t num_seeds, const bool pin_memory, size_t total_num_ids_expected) {
+  const IdType* ids_data = ids.data_ptr<IdType>();
+  const size_t num_ids = static_cast<size_t>(ids.size(0));
+  const size_t capacity = total_num_ids_expected == 0 ? GetMapSize(num_ids) : GetMapSize(total_num_ids_expected);
+
+  mask_ = static_cast<IdType>(capacity - 1);
+  hash_map_ = torch::full({static_cast<int64_t>(capacity * 2)}, -1, ids.options());
+
+  // This code block is to fill the ids into hash_map_.
+  auto valid_tensor = torch::empty(num_ids, ids.options().dtype(torch::kInt8));
+  auto valid = valid_tensor.data_ptr<int8_t>();
+
+  const int64_t num_threads = torch::get_num_threads();
+  std::vector<size_t> block_offset(num_threads + 1, 0);
+
+  // Insert seed ids into the hash map.
+  torch::parallel_for(0, num_seeds, kGrainSize, [&](int64_t s, int64_t e) {
+    for (int64_t i = s; i < e; i++) {
+      InsertAndSet(ids_data[i], static_cast<IdType>(i));
+    }
+  });
+  // Insert remaining ids into the hash map.
+  torch::parallel_for(num_seeds, num_ids, kGrainSize, [&](int64_t s, int64_t e) {
+    size_t count = 0;
+    for (int64_t i = s; i < e; i++) {
+      valid[i] = Insert(ids_data[i]);
+      count += valid[i];
+    }
+    auto thread_id = torch::get_thread_num();
+    block_offset[thread_id + 1] = count;
+  });
+
+  // Get ExclusiveSum of each block.
+  std::partial_sum(
+      block_offset.begin() + 1, block_offset.end(), block_offset.begin() + 1);
+
+  auto opt = ids.options();
+  if(pin_memory) opt = opt.pinned_memory(true);
+  unique_ids_ = torch::empty(num_seeds + block_offset.back(), opt);
+  IdType* unique_ids_data = unique_ids_.data_ptr<IdType>();
+  unique_ids_.slice(0, 0, num_seeds) = ids.slice(0, 0, num_seeds);
+
+  // Get unique array from ids and set value for hash map.
+  torch::parallel_for(
+      num_seeds, num_ids, kGrainSize, [&](int64_t s, int64_t e) {
+        auto thread_id = torch::get_thread_num();
+        auto pos = block_offset[thread_id] + num_seeds;
+        for (int64_t i = s; i < e; i++) {
+          if (valid[i]) {
+            unique_ids_data[pos] = ids_data[i];
+            Set(ids_data[i], pos);
+            pos = pos + 1;
+          }
+        }
+      });
+
+  return unique_ids_;
+}
+
+template <typename IdType>
+const torch::Tensor& ConcurrentIdHashMap<IdType>::UpdateHashMap(
+    const torch::Tensor& ids, const bool pin_memory) {
+  const IdType* ids_data = ids.data_ptr<IdType>();
+  const size_t num_ids = static_cast<size_t>(ids.size(0));
+  const size_t num_seeds = static_cast<size_t>(unique_ids_.size(0));
+
+  // This code block is to fill the ids into hash_map_.
+  auto valid_tensor = torch::empty(num_ids, ids.options().dtype(torch::kInt8));
+  auto valid = valid_tensor.data_ptr<int8_t>();
+
+  const int64_t num_threads = torch::get_num_threads();
+  std::vector<size_t> block_offset(num_threads + 1, 0);
+
+  // Insert ids into the hash map (seeds are already in there)
+  torch::parallel_for(0, num_ids, kGrainSize, [&](int64_t s, int64_t e) {
+    size_t count = 0;
+    for (int64_t i = s; i < e; i++) {
+      valid[i] = Insert(ids_data[i]);
+      count += valid[i];
+    }
+    auto thread_id = torch::get_thread_num();
+    block_offset[thread_id + 1] = count;
+  });
+
+  // Get ExclusiveSum of each block.
+  std::partial_sum(
+      block_offset.begin() + 1, block_offset.end(), block_offset.begin() + 1);
+
+  auto opt = ids.options();
+  if(pin_memory) opt = opt.pinned_memory(true);
+  unique_ids_ = torch::cat({unique_ids_, torch::empty(block_offset.back(), opt)});
+  IdType* unique_ids_data = unique_ids_.data_ptr<IdType>();
+
+  // Get unique array from ids and set value for hash map.
+  torch::parallel_for(
+      0, num_ids, kGrainSize, [&](int64_t s, int64_t e) {
+        auto thread_id = torch::get_thread_num();
+        auto pos = block_offset[thread_id] + num_seeds;
+        for (int64_t i = s; i < e; i++) {
+          if (valid[i]) {
+            unique_ids_data[pos] = ids_data[i];
+            Set(ids_data[i], pos);
+            pos = pos + 1;
+          }
+        }
+      });
+
+  return unique_ids_;
+}
+
+template <typename IdType>
 torch::Tensor ConcurrentIdHashMap<IdType>::MapIds(
-    const torch::Tensor& ids) const {
+    const torch::Tensor& ids, const bool pin_memory) const {
   const IdType* ids_data = ids.data_ptr<IdType>();
 
-  torch::Tensor new_ids = torch::empty_like(ids);
-  auto num_ids = new_ids.size(0);
+  auto num_ids = ids.size(0);
+  auto opt = ids.options();
+  if(pin_memory) opt = opt.pinned_memory(true);
+  torch::Tensor new_ids = torch::empty(num_ids, opt);
   IdType* values_data = new_ids.data_ptr<IdType>();
 
   torch::parallel_for(0, num_ids, kGrainSize, [&](int64_t s, int64_t e) {

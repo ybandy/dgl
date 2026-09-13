@@ -63,7 +63,9 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
 UniqueAndCompact(
     const torch::Tensor& src_ids, const torch::Tensor& dst_ids,
     const torch::Tensor unique_dst_ids, const int64_t rank,
-    const int64_t world_size);
+    const int64_t world_size,
+    const int64_t minibatch_idx = -1, const int64_t num_layers = 0, const int64_t layer_idx = -1,
+    const bool pin_memory = false);
 
 std::vector<
     std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>>
@@ -71,7 +73,9 @@ UniqueAndCompactBatched(
     const std::vector<torch::Tensor>& src_ids,
     const std::vector<torch::Tensor>& dst_ids,
     const std::vector<torch::Tensor> unique_dst_ids, const int64_t rank,
-    const int64_t world_size);
+    const int64_t world_size,
+    const int64_t minibatch_idx = -1, const int64_t num_layers = 0, const int64_t layer_idx = -1,
+    const bool pin_memory = false);
 
 c10::intrusive_ptr<Future<std::vector<
     std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>>>>
@@ -79,7 +83,9 @@ UniqueAndCompactBatchedAsync(
     const std::vector<torch::Tensor>& src_ids,
     const std::vector<torch::Tensor>& dst_ids,
     const std::vector<torch::Tensor> unique_dst_ids, const int64_t rank,
-    const int64_t world_size);
+    const int64_t world_size,
+    const int64_t minibatch_idx = -1, const int64_t num_layers = 0, const int64_t layer_idx = -1,
+    const bool pin_memory = false);
 
 }  // namespace sampling
 }  // namespace graphbolt

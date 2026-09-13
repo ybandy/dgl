@@ -24,6 +24,8 @@
 #include <utility>
 #include <vector>
 
+#include "./utils.h"
+
 namespace graphbolt {
 namespace storage {
 
@@ -84,7 +86,7 @@ class OnDiskNpyArray : public torch::CustomClassHolder {
    * @brief Read disk numpy file based on given index and transform to
    * tensor.
    */
-  c10::intrusive_ptr<Future<torch::Tensor>> IndexSelect(torch::Tensor index);
+  c10::intrusive_ptr<Future<torch::Tensor>> IndexSelect(torch::Tensor index, int64_t minibatch_idx);
 
 #ifdef HAVE_LIBRARY_LIBURING
   /**
@@ -102,9 +104,9 @@ class OnDiskNpyArray : public torch::CustomClassHolder {
    * @throws std::runtime_error If index is out of range.
    */
   c10::intrusive_ptr<Future<torch::Tensor>> IndexSelectIOUring(
-      torch::Tensor index);
+      torch::Tensor index, int64_t minibatch_idx);
 
-  torch::Tensor IndexSelectIOUringImpl(torch::Tensor index);
+  torch::Tensor IndexSelectIOUringImpl(torch::Tensor index, int64_t minibatch_idx);
 
 #endif  // HAVE_LIBRARY_LIBURING
  private:
@@ -222,6 +224,9 @@ class OnDiskNpyArray : public torch::CustomClassHolder {
   };
 
 #endif  // HAVE_LIBRARY_LIBURING
+
+ private:
+  utils::TimeStamp* timestamp;
 };
 
 }  // namespace storage

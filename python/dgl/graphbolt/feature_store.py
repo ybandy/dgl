@@ -165,6 +165,7 @@ class FeatureStore:
         type_name: str,
         feature_name: str,
         ids: torch.Tensor = None,
+        minibatch_idx: int = -1,
     ):
         """Read from the feature store.
 
@@ -185,7 +186,7 @@ class FeatureStore:
         torch.Tensor
             The read feature.
         """
-        return self.__getitem__((domain, type_name, feature_name)).read(ids)
+        return self.__getitem__((domain, type_name, feature_name)).read(ids, minibatch_idx)
 
     def size(
         self,

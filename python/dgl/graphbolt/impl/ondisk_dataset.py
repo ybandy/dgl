@@ -6,7 +6,7 @@ import os
 import shutil
 import textwrap
 from copy import deepcopy
-from typing import Dict, List, Union
+from typing import Dict, List, Union, Optional
 
 import numpy as np
 
@@ -717,7 +717,8 @@ class OnDiskDataset(Dataset):
                                 self._dataset_dir, data["path"]
                             )
 
-    def load(self, tasks: List[str] = None):
+    def load(self, tasks: List[str] = None, num_threads: Optional[int] = None,
+             num_contexts: Optional[int] = None, index_select_mode: Optional[int] = None):
         """Load the dataset.
 
         Parameters
@@ -763,7 +764,8 @@ class OnDiskDataset(Dataset):
         self._meta = OnDiskMetaData(**self._yaml_data)
         self._dataset_name = self._meta.dataset_name
         self._graph = self._load_graph(self._meta.graph_topology)
-        self._feature = TorchBasedFeatureStore(self._meta.feature_data)
+        self._feature = TorchBasedFeatureStore(self._meta.feature_data, num_threads,
+                                               num_contexts, index_select_mode)
         self._tasks = self._init_tasks(self._meta.tasks, tasks)
         self._all_nodes_set = self._init_all_nodes_set(self._graph)
         self._loaded = True

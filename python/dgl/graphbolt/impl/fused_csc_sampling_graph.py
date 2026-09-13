@@ -3,7 +3,7 @@
 import textwrap
 
 # pylint: disable= invalid-name
-from typing import Dict, Optional, Union
+from typing import Dict, Optional, Union, List
 
 import torch
 
@@ -755,6 +755,8 @@ class FusedCSCSamplingGraph(SamplingGraph):
         probs_name: Optional[str] = None,
         returning_indices_and_original_edge_ids_are_optional: bool = False,
         async_op: bool = False,
+        pin_memory: bool = False,
+        return_picked_eids: bool = True,
     ) -> SampledSubgraphImpl:
         """Sample neighboring edges of the given nodes and return the induced
         subgraph.
@@ -848,6 +850,8 @@ class FusedCSCSamplingGraph(SamplingGraph):
             probs_or_mask=probs_or_mask,
             returning_indices_is_optional=returning_indices_and_original_edge_ids_are_optional,
             async_op=async_op,
+            pin_memory=pin_memory,
+            return_picked_eids=return_picked_eids,
         )
         if async_op:
             return _SampleNeighborsWaiter(
@@ -861,6 +865,45 @@ class FusedCSCSamplingGraph(SamplingGraph):
                 C_sampled_subgraph,
                 seed_offsets,
                 returning_indices_and_original_edge_ids_are_optional,
+            )
+
+    def sample_neighbors_and_compact(
+        self,
+        seeds: Union[torch.Tensor, Dict[str, torch.Tensor]],
+        fanouts: torch.Tensor,
+        pin_memory: bool = False,
+        return_picked_eids: bool = True,
+    ):# -> SampledSubgraphImpl:
+        self._check_sampler_arguments(seeds, fanouts, None)
+        (
+            indptr,
+            original_edge_ids,
+            unique_nodes,
+            compacted_indices
+        ) = self._c_csc_graph.sample_neighbors_and_compact(
+            seeds, fanouts.tolist(), pin_memory, return_picked_eids
+        )
+        compacted_csc_formats = CSCFormatBase(
+            indptr=indptr,
+            indices=compacted_indices
+        )
+        return original_edge_ids, unique_nodes, compacted_csc_formats
+
+    def sample_neighbors_all(
+        self,
+        seeds: Union[torch.Tensor, Dict[str, torch.Tensor]],
+        fanouts: List,
+        pin_memory: bool = False,
+        return_picked_eids: bool = True,
+        asynchronous: bool = False,
+    ):
+        if(asynchronous):
+            return self._c_csc_graph.sample_neighbors_all_async(
+                seeds, fanouts, pin_memory, return_picked_eids
+            )
+        else:
+            return self._c_csc_graph.sample_neighbors_all(
+                seeds, fanouts, pin_memory, return_picked_eids
             )
 
     def _check_sampler_arguments(self, nodes, fanouts, probs_or_mask):
@@ -911,6 +954,8 @@ class FusedCSCSamplingGraph(SamplingGraph):
         probs_or_mask: Optional[torch.Tensor] = None,
         returning_indices_is_optional: bool = False,
         async_op: bool = False,
+        pin_memory: bool = False,
+        return_picked_eids: bool = True,
     ) -> torch.ScriptObject:
         """Sample neighboring edges of the given nodes and return the induced
         subgraph.
@@ -979,6 +1024,8 @@ class FusedCSCSamplingGraph(SamplingGraph):
             probs_or_mask,
             None,  # random_seed, labor parameter
             0,  # seed2_contribution, labor_parameter
+            pin_memory,
+            return_picked_eids,
         )
 
     def sample_layer_neighbors(

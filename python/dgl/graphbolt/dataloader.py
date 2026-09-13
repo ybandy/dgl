@@ -61,7 +61,7 @@ class MultiprocessingWrapper(torch_data.IterDataPipe):
         instances alive.
     """
 
-    def __init__(self, datapipe, num_workers=0, persistent_workers=True):
+    def __init__(self, datapipe, num_workers=0, persistent_workers=True, prefetch_factor=None):
         self.datapipe = datapipe
         self.dataloader = torch_data.DataLoader(
             datapipe,
@@ -69,6 +69,7 @@ class MultiprocessingWrapper(torch_data.IterDataPipe):
             num_workers=num_workers,
             persistent_workers=(num_workers > 0) and persistent_workers,
             worker_init_fn=_set_worker_id if num_workers > 0 else None,
+            prefetch_factor=prefetch_factor,
         )
 
     def __iter__(self):
@@ -111,6 +112,7 @@ class DataLoader(MiniBatchTransformer):
         num_workers=0,
         persistent_workers=True,
         max_uva_threads=10240,
+        prefetch_factor=None,
     ):
         # Multiprocessing requires two modifications to the datapipe:
         #
@@ -145,6 +147,7 @@ class DataLoader(MiniBatchTransformer):
                 MultiprocessingWrapper,
                 num_workers=num_workers,
                 persistent_workers=persistent_workers,
+                prefetch_factor=prefetch_factor,
             )
 
         # (3) Limit the number of UVA threads used if the feature_fetcher

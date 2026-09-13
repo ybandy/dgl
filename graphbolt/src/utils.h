@@ -10,6 +10,7 @@
 #include <torch/script.h>
 
 #include <optional>
+#include <ostream>
 
 namespace graphbolt {
 namespace utils {
@@ -96,6 +97,26 @@ T GetValueByIndex(const torch::Tensor& tensor, int64_t index) {
   auto data_ptr = contiguous_tensor.data_ptr<T>();
   return data_ptr[index];
 }
+
+
+class TimeStamp {
+ public:
+  TimeStamp(std::string label);
+  ~TimeStamp();
+  void set_num_layers(int64_t num_layers);
+  void record_start(int64_t minibatch_idx, int64_t layer_idx = 0);
+  void record_end(int64_t minibatch_idx, int64_t layer_idx = 0);
+
+ private:
+  inline void record_time(int64_t minibatch_idx, int64_t layer_idx,
+                          std::vector<std::chrono::nanoseconds> &times);
+  inline void dump(std::ostream &ost, int64_t idx, std::chrono::nanoseconds time, std::string when);
+
+  static const int64_t max_num_timestamps_ = 4096;
+  int64_t num_layers_ = 0;
+  std::string label_;
+  std::vector<std::chrono::nanoseconds> start_times_, end_times_;
+};
 
 }  // namespace utils
 }  // namespace graphbolt

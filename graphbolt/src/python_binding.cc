@@ -14,6 +14,8 @@
 #include "./cuda/max_uva_threads.h"
 #endif
 #include "./cnumpy.h"
+#include "./spdk.h"
+#include "./pin_memory.h"
 #include "./feature_cache.h"
 #include "./index_select.h"
 #include "./io_uring.h"
@@ -79,6 +81,8 @@ TORCH_LIBRARY(graphbolt, m) {
           &Future<std::tuple<torch::Tensor, std::vector<torch::Tensor>>>::Wait);
   m.class_<storage::OnDiskNpyArray>("OnDiskNpyArray")
       .def("index_select", &storage::OnDiskNpyArray::IndexSelect);
+  m.class_<storage::SPDK>("SPDK")
+      .def("index_select", &storage::SPDK::IndexSelect);
   m.class_<FusedCSCSamplingGraph>("FusedCSCSamplingGraph")
       .def("num_nodes", &FusedCSCSamplingGraph::NumNodes)
       .def("num_edges", &FusedCSCSamplingGraph::NumEdges)
@@ -107,6 +111,9 @@ TORCH_LIBRARY(graphbolt, m) {
       .def(
           "sample_neighbors_async",
           &FusedCSCSamplingGraph::SampleNeighborsAsync)
+      .def("sample_neighbors_and_compact", &FusedCSCSamplingGraph::SampleNeighborsAndCompact)
+      .def("sample_neighbors_all", &FusedCSCSamplingGraph::SampleNeighborsAll2)
+      .def("sample_neighbors_all_async", &FusedCSCSamplingGraph::SampleNeighborsAllAsync2)
       .def(
           "temporal_sample_neighbors",
           &FusedCSCSamplingGraph::TemporalSampleNeighbors)
@@ -197,7 +204,9 @@ TORCH_LIBRARY(graphbolt, m) {
   m.def("index_select_csc", &ops::IndexSelectCSC);
   m.def("index_select_csc_batched", &ops::IndexSelectCSCBatched);
   m.def("index_select_csc_batched_async", &ops::IndexSelectCSCBatchedAsync);
+  m.def("pin_memory_async", &ops::PinMemoryAsync);
   m.def("ondisk_npy_array", &storage::OnDiskNpyArray::Create);
+  m.def("spdk", &storage::SPDK::Create);
   m.def("detect_io_uring", &io_uring::IsAvailable);
   m.def("set_num_io_uring_threads", &io_uring::SetNumThreads);
   m.def("set_worker_id", &utils::SetWorkerId);

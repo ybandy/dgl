@@ -207,9 +207,10 @@ inline auto async(F&& function, bool is_cuda = false) {
 template <ThreadPool pool_type, bool for_each, typename F>
 inline void _parallel_for(
     const int64_t begin, const int64_t end, const int64_t grain_size,
+    int64_t num_threads,
     const F& f) {
   if (begin >= end) return;
-  int64_t num_threads = get_num_threads();
+  //int64_t num_threads = get_num_threads();
   const auto num_iter = end - begin;
   const bool use_parallel =
       (num_iter > grain_size && num_iter > 1 && num_threads > 1);
@@ -305,7 +306,15 @@ template <typename F>
 inline void parallel_for(
     const int64_t begin, const int64_t end, const int64_t grain_size,
     const F& f) {
-  _parallel_for<ThreadPool::intraop, false>(begin, end, grain_size, f);
+  _parallel_for<ThreadPool::intraop, false>(begin, end, grain_size, get_num_threads(), f);
+}
+
+template <typename F>
+inline void parallel_for(
+    const int64_t begin, const int64_t end, const int64_t grain_size,
+    const int64_t num_threads,
+    const F& f) {
+  _parallel_for<ThreadPool::intraop, false>(begin, end, grain_size, num_threads, f);
 }
 
 /**
@@ -316,7 +325,15 @@ template <typename F>
 inline void parallel_for_each(
     const int64_t begin, const int64_t end, const int64_t grain_size,
     const F& f) {
-  _parallel_for<ThreadPool::intraop, true>(begin, end, grain_size, f);
+  _parallel_for<ThreadPool::intraop, true>(begin, end, grain_size, get_num_threads(), f);
+}
+
+template <typename F>
+inline void parallel_for_each(
+    const int64_t begin, const int64_t end, const int64_t grain_size,
+    const int64_t num_threads,
+    const F& f) {
+  _parallel_for<ThreadPool::intraop, true>(begin, end, grain_size, num_threads, f);
 }
 
 /**
@@ -326,7 +343,15 @@ template <typename F>
 inline void parallel_for_interop(
     const int64_t begin, const int64_t end, const int64_t grain_size,
     const F& f) {
-  _parallel_for<ThreadPool::interop, false>(begin, end, grain_size, f);
+  _parallel_for<ThreadPool::interop, false>(begin, end, grain_size, get_num_threads(), f);
+}
+
+template <typename F>
+inline void parallel_for_interop(
+    const int64_t begin, const int64_t end, const int64_t grain_size,
+    const int64_t num_threads,
+    const F& f) {
+  _parallel_for<ThreadPool::interop, false>(begin, end, grain_size, num_threads, f);
 }
 
 /**
@@ -337,7 +362,15 @@ template <typename F>
 inline void parallel_for_each_interop(
     const int64_t begin, const int64_t end, const int64_t grain_size,
     const F& f) {
-  _parallel_for<ThreadPool::interop, true>(begin, end, grain_size, f);
+  _parallel_for<ThreadPool::interop, true>(begin, end, grain_size, get_num_threads(), f);
+}
+
+template <typename F>
+inline void parallel_for_each_interop(
+    const int64_t begin, const int64_t end, const int64_t grain_size,
+    const int64_t num_threads,
+    const F& f) {
+  _parallel_for<ThreadPool::interop, true>(begin, end, grain_size, num_threads, f);
 }
 
 }  // namespace graphbolt

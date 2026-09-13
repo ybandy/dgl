@@ -18,7 +18,9 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
 UniqueAndCompact(
     const torch::Tensor& src_ids, const torch::Tensor& dst_ids,
     const torch::Tensor unique_dst_ids, const int64_t rank,
-    const int64_t world_size) {
+    const int64_t world_size,
+    const int64_t minibatch_idx, const int64_t num_layers, const int64_t layer_idx,
+    const bool pin_memory) {
   if (utils::is_on_gpu(src_ids) && utils::is_on_gpu(dst_ids) &&
       utils::is_on_gpu(unique_dst_ids)) {
     GRAPHBOLT_DISPATCH_CUDA_ONLY_DEVICE(
@@ -32,16 +34,15 @@ UniqueAndCompact(
       "Cooperative Minibatching (arXiv:2310.12403) is supported only on GPUs.");
   auto num_dst = unique_dst_ids.size(0);
   torch::Tensor ids = torch::cat({unique_dst_ids, src_ids});
-  auto [unique_ids, compacted_src, compacted_dst] = AT_DISPATCH_INDEX_TYPES(
+  auto [unique_ids, compacted_src] = AT_DISPATCH_INDEX_TYPES(
       ids.scalar_type(), "unique_and_compact", ([&] {
-        ConcurrentIdHashMap<index_t> id_map(ids, num_dst);
-        return std::make_tuple(
-            id_map.GetUniqueIds(), id_map.MapIds(src_ids),
-            id_map.MapIds(dst_ids));
+        ConcurrentIdHashMap<index_t> id_map;
+        auto uids = id_map.ConstructHashMap(ids, num_dst, pin_memory);
+        auto ret = std::make_tuple(
+            uids, id_map.MapIds(src_ids, pin_memory));
+        return ret;
       }));
-  auto offsets = torch::zeros(2, c10::TensorOptions().dtype(torch::kInt64));
-  offsets.data_ptr<int64_t>()[1] = unique_ids.size(0);
-  return {unique_ids, compacted_src, compacted_dst, offsets};
+  return {unique_ids, compacted_src, torch::empty(0), torch::empty(0)};
 }
 
 std::vector<
@@ -50,7 +51,9 @@ UniqueAndCompactBatched(
     const std::vector<torch::Tensor>& src_ids,
     const std::vector<torch::Tensor>& dst_ids,
     const std::vector<torch::Tensor> unique_dst_ids, const int64_t rank,
-    const int64_t world_size) {
+    const int64_t world_size,
+    const int64_t minibatch_idx, const int64_t num_layers, const int64_t layer_idx,
+    const bool pin_memory) {
   TORCH_CHECK(
       src_ids.size() == dst_ids.size() &&
           dst_ids.size() == unique_dst_ids.size(),
@@ -75,7 +78,7 @@ UniqueAndCompactBatched(
   results.reserve(src_ids.size());
   for (std::size_t i = 0; i < src_ids.size(); i++) {
     results.emplace_back(UniqueAndCompact(
-        src_ids[i], dst_ids[i], unique_dst_ids[i], rank, world_size));
+        src_ids[i], dst_ids[i], unique_dst_ids[i], rank, world_size, minibatch_idx, num_layers, layer_idx, pin_memory));
   }
   return results;
 }
@@ -86,11 +89,13 @@ UniqueAndCompactBatchedAsync(
     const std::vector<torch::Tensor>& src_ids,
     const std::vector<torch::Tensor>& dst_ids,
     const std::vector<torch::Tensor> unique_dst_ids, const int64_t rank,
-    const int64_t world_size) {
+    const int64_t world_size,
+    const int64_t minibatch_idx, const int64_t num_layers, const int64_t layer_idx,
+    const bool pin_memory) {
   return async(
       [=] {
         return UniqueAndCompactBatched(
-            src_ids, dst_ids, unique_dst_ids, rank, world_size);
+            src_ids, dst_ids, unique_dst_ids, rank, world_size, minibatch_idx, num_layers, layer_idx, pin_memory);
       },
       utils::is_on_gpu(src_ids.at(0)));
 }

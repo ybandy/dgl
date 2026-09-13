@@ -212,7 +212,7 @@ def indptr_edge_ids(indptr, dtype=None, offset=None, output_size=None):
     )
 
 
-def index_select(tensor, index):
+def index_select(tensor, index, minibatch_idx = -1, num_threads = 0):
     """Returns a new tensor which indexes the input tensor along dimension dim
     using the entries in index.
 
@@ -237,7 +237,7 @@ def index_select(tensor, index):
         pinned memory, then the result is placed into pinned memory as well.
     """
     assert index.dim() == 1, "Index should be 1D tensor."
-    return torch.ops.graphbolt.index_select(tensor, index)
+    return torch.ops.graphbolt.index_select(tensor, index, minibatch_idx, num_threads)
 
 
 def etype_tuple_to_str(c_etype):
@@ -327,7 +327,8 @@ def is_object_pinned(obj):
     for attr in get_nonproperty_attributes(obj):
         member_result = recursive_apply_reduce_all(
             getattr(obj, attr),
-            lambda x: x is None or x.is_pinned(),
+            #lambda x: x is None or x.is_pinned(),
+            lambda x: x is None or isinstance(x, int) or x.is_pinned(),
         )
         if not member_result:
             return False

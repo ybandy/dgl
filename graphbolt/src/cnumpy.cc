@@ -92,6 +92,7 @@ OnDiskNpyArray::OnDiskNpyArray(
 #else
   throw std::runtime_error("DiskBasedFeature is not available now.");
 #endif  // HAVE_LIBRARY_LIBURING
+  timestamp = new utils::TimeStamp("IndexSelect");
 }
 
 c10::intrusive_ptr<OnDiskNpyArray> OnDiskNpyArray::Create(
@@ -104,6 +105,7 @@ OnDiskNpyArray::~OnDiskNpyArray() {
 #ifdef HAVE_LIBRARY_LIBURING
   TORCH_CHECK(::close(file_description_) == 0);
 #endif  // HAVE_LIBRARY_LIBURING
+  delete timestamp;
 }
 
 void OnDiskNpyArray::ParseNumpyHeader() {
@@ -122,9 +124,9 @@ void OnDiskNpyArray::ParseNumpyHeader() {
 }
 
 c10::intrusive_ptr<Future<torch::Tensor>> OnDiskNpyArray::IndexSelect(
-    torch::Tensor index) {
+    torch::Tensor index, int64_t minibatch_idx) {
 #ifdef HAVE_LIBRARY_LIBURING
-  return IndexSelectIOUring(index);
+  return IndexSelectIOUring(index, minibatch_idx);
 #else
   TORCH_CHECK(false, "OnDiskNpyArray is not supported on non-Linux systems.");
   return {};
@@ -156,16 +158,19 @@ class ReadRequest {
 };
 
 #ifdef HAVE_LIBRARY_LIBURING
-torch::Tensor OnDiskNpyArray::IndexSelectIOUringImpl(torch::Tensor index) {
+torch::Tensor OnDiskNpyArray::IndexSelectIOUringImpl(torch::Tensor index, int64_t minibatch_idx) {
   std::vector<int64_t> shape(index.sizes().begin(), index.sizes().end());
   shape.insert(shape.end(), feature_dim_.begin() + 1, feature_dim_.end());
   auto result = torch::empty(
       shape, index.options()
                  .dtype(dtype_)
                  .layout(torch::kStrided)
-                 .pinned_memory(utils::is_pinned(index))
+                 //.pinned_memory(utils::is_pinned(index))
+                 .pinned_memory(true) // force pinned memory for fetched features
                  .requires_grad(false));
   auto result_buffer = reinterpret_cast<char *>(result.data_ptr());
+
+  timestamp->record_start(minibatch_idx);
 
   // Indicator for index error.
   std::atomic<int> error_flag{};
@@ -298,6 +303,9 @@ torch::Tensor OnDiskNpyArray::IndexSelectIOUringImpl(torch::Tensor index) {
       num_completed += num_cqes_seen;
     }
   });
+
+  timestamp->record_end(minibatch_idx);
+
   const auto ret_val = error_flag.load(std::memory_order_relaxed);
   switch (ret_val) {
     case 0:  // Successful.
@@ -311,8 +319,8 @@ torch::Tensor OnDiskNpyArray::IndexSelectIOUringImpl(torch::Tensor index) {
 }
 
 c10::intrusive_ptr<Future<torch::Tensor>> OnDiskNpyArray::IndexSelectIOUring(
-    torch::Tensor index) {
-  return async([=, this] { return IndexSelectIOUringImpl(index); });
+    torch::Tensor index, int64_t minibatch_idx) {
+  return async([=, this] { return IndexSelectIOUringImpl(index, minibatch_idx); });
 }
 
 #endif  // HAVE_LIBRARY_LIBURING

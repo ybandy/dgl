@@ -2,7 +2,7 @@
 
 import copy
 import textwrap
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import numpy as np
 import torch
@@ -92,7 +92,8 @@ class TorchBasedFeature(Feature):
     device(type='cuda', index=0)
     """
 
-    def __init__(self, torch_feature: torch.Tensor, metadata: Dict = None):
+    def __init__(self, torch_feature: torch.Tensor, metadata: Dict = None,
+                 num_threads: Optional[int] = None):
         super().__init__()
         self._is_inplace_pinned = set()
         assert isinstance(torch_feature, torch.Tensor), (
@@ -106,6 +107,7 @@ class TorchBasedFeature(Feature):
         # Make sure the tensor is contiguous.
         self._tensor = torch_feature.contiguous()
         self._metadata = metadata
+        self._num_threads = 0 if num_threads is None else num_threads
 
     def __del__(self):
         # torch.Tensor.pin_memory() is not an inplace operation. To make it
@@ -115,7 +117,7 @@ class TorchBasedFeature(Feature):
         for tensor in self._is_inplace_pinned:
             assert self._inplace_unpinner(tensor.data_ptr()) == 0
 
-    def read(self, ids: torch.Tensor = None):
+    def read(self, ids: torch.Tensor = None, minibatch_idx: int = -1):
         """Read the feature by index.
 
         If the feature is on pinned CPU memory and `ids` is on GPU or pinned CPU
@@ -137,9 +139,9 @@ class TorchBasedFeature(Feature):
             if self._tensor.is_pinned():
                 return self._tensor.cuda()
             return self._tensor
-        return index_select(self._tensor, ids)
+        return index_select(self._tensor, ids, minibatch_idx, self._num_threads)
 
-    def read_async(self, ids: torch.Tensor):
+    def read_async(self, ids: torch.Tensor, minibatch_idx: int):
         r"""Read the feature by index asynchronously.
 
         Parameters
@@ -204,7 +206,7 @@ class TorchBasedFeature(Feature):
 
             yield _Waiter(values_copy_event, values_cuda)
         else:
-            yield torch.ops.graphbolt.index_select_async(self._tensor, ids)
+            yield torch.ops.graphbolt.index_select_async(self._tensor, ids, minibatch_idx, self._num_threads)
 
     def read_async_num_stages(self, ids_device: torch.device):
         """The number of stages of the read_async operation. See read_async
@@ -384,7 +386,8 @@ class DiskBasedFeature(Feature):
     torch.Size([5])
     """
 
-    def __init__(self, path: str, metadata: Dict = None, num_threads=None):
+    def __init__(self, path: str, metadata: Dict = None, num_threads: Optional[int] = None,
+                 num_contexts: Optional[int] = None, index_select_mode: Optional[int] = None):
         super().__init__()
         mmap_mode = "r+"
         ondisk_data = np.load(path, mmap_mode=mmap_mode)
@@ -394,7 +397,15 @@ class DiskBasedFeature(Feature):
         self._tensor = torch.from_numpy(ondisk_data)
 
         self._metadata = metadata
-        if torch.ops.graphbolt.detect_io_uring():
+        self._disk_type = metadata["disk_type"] if("disk_type" in metadata) else None
+        if(self._disk_type == 'spdk'):
+            print('SPDK will be used')
+            self._spdk = torch.ops.graphbolt.spdk(
+                self._tensor.dtype, self._tensor.shape, num_threads,
+                num_contexts, index_select_mode
+            )
+        elif torch.ops.graphbolt.detect_io_uring():
+            print('io_uring will be used')
             self._ondisk_npy_array = torch.ops.graphbolt.ondisk_npy_array(
                 path, self._tensor.dtype, self._tensor.shape, num_threads
             )
@@ -414,6 +425,8 @@ class DiskBasedFeature(Feature):
         """
         if ids is None:
             return self._tensor
+        elif self._disk_type == 'spdk':
+            raise NotImplementedError('non-async read is not supported')
         elif torch.ops.graphbolt.detect_io_uring():
             try:
                 return self._ondisk_npy_array.index_select(ids).wait()
@@ -422,7 +435,7 @@ class DiskBasedFeature(Feature):
         else:
             return index_select(self._tensor, ids)
 
-    def read_async(self, ids: torch.Tensor):
+    def read_async(self, ids: torch.Tensor, minibatch_idx: int):
         r"""Read the feature by index asynchronously.
 
         Parameters
@@ -474,8 +487,10 @@ class DiskBasedFeature(Feature):
                 values_copy_event.record()
 
             yield _Waiter(values_copy_event, values_cuda)
+        elif self._disk_type == 'spdk':
+            yield self._spdk.index_select(ids, minibatch_idx)
         else:
-            yield self._ondisk_npy_array.index_select(ids)
+            yield self._ondisk_npy_array.index_select(ids, minibatch_idx)
 
     def read_async_num_stages(self, ids_device: torch.device):
         """The number of stages of the read_async operation. See read_async
@@ -604,7 +619,8 @@ class TorchBasedFeatureStore(BasicFeatureStore):
     >>> feature_store = gb.TorchBasedFeatureStore(feat_data)
     """
 
-    def __init__(self, feat_data: List[OnDiskFeatureData]):
+    def __init__(self, feat_data: List[OnDiskFeatureData], num_threads: Optional[int] = None,
+                 num_contexts: Optional[int] = None, index_select_mode: Optional[int] = None):
         features = {}
         for spec in feat_data:
             key = (spec.domain, spec.type, spec.name)
@@ -621,12 +637,14 @@ class TorchBasedFeatureStore(BasicFeatureStore):
                 if spec.in_memory:
                     # TorchBasedFeature is always in memory by default.
                     features[key] = TorchBasedFeature(
-                        torch.as_tensor(np.load(spec.path)), metadata=metadata
+                        torch.as_tensor(np.load(spec.path)), metadata=metadata,
+                        num_threads=num_threads,
                     )
                 else:
                     # DiskBasedFeature is always out of memory by default.
                     features[key] = DiskBasedFeature(
-                        spec.path, metadata=metadata
+                        spec.path, metadata=metadata, num_threads=num_threads,
+                        num_contexts=num_contexts, index_select_mode=index_select_mode
                     )
             else:
                 raise ValueError(f"Unknown feature format {spec.format}")

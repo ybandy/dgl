@@ -10,6 +10,7 @@
 
 #include <cstring>
 #include <numeric>
+#include <mutex>
 
 #include "./macro.h"
 #include "./utils.h"
@@ -19,7 +20,11 @@ namespace ops {
 
 constexpr int kIntGrainSize = 64;
 
-torch::Tensor IndexSelect(torch::Tensor input, torch::Tensor index) {
+utils::TimeStamp timestamp("IndexSelect");
+
+std::mutex g_mutex;
+
+torch::Tensor IndexSelect(torch::Tensor input, torch::Tensor index, int64_t minibatch_idx, int64_t num_threads) {
   if (utils::is_on_gpu(index)) {
     if (input.is_pinned()) {
       GRAPHBOLT_DISPATCH_CUDA_ONLY_DEVICE(
@@ -29,22 +34,28 @@ torch::Tensor IndexSelect(torch::Tensor input, torch::Tensor index) {
       return torch::index_select(input, 0, index);
     }
   }
+
+  std::lock_guard<std::mutex> guard(g_mutex);
+  timestamp.record_start(minibatch_idx);
+
   auto output_shape = input.sizes().vec();
   output_shape[0] = index.numel();
   auto result = torch::empty(
       output_shape, index.options()
                         .dtype(input.dtype())
-                        .pinned_memory(utils::is_pinned(index)));
+                        //.pinned_memory(utils::is_pinned(index)));
+                        .pinned_memory(true)); // force pinned memory for fetched features
   auto result_ptr = reinterpret_cast<std::byte*>(result.data_ptr());
   const auto input_ptr = reinterpret_cast<std::byte*>(input.data_ptr());
   const auto row_bytes = input.slice(0, 0, 1).numel() * input.element_size();
   const auto stride = input.stride(0) * input.element_size();
   const auto num_input_rows = input.size(0);
+  if(num_threads <= 0) num_threads = get_num_threads();
   AT_DISPATCH_INDEX_TYPES(
       index.scalar_type(), "IndexSelect::index::scalar_type()", ([&] {
         const auto index_ptr = index.data_ptr<index_t>();
         graphbolt::parallel_for(
-            0, index.size(0), kIntGrainSize, [&](int64_t begin, int64_t end) {
+            0, index.size(0), kIntGrainSize, num_threads, [&](int64_t begin, int64_t end) {
               for (int64_t i = begin; i < end; i++) {
                 auto idx = index_ptr[i];
                 if (idx < 0) idx += num_input_rows;
@@ -58,13 +69,16 @@ torch::Tensor IndexSelect(torch::Tensor input, torch::Tensor index) {
               }
             });
       }));
+
+  timestamp.record_end(minibatch_idx);
+
   return result;
 }
 
 c10::intrusive_ptr<Future<torch::Tensor>> IndexSelectAsync(
-    torch::Tensor input, torch::Tensor index) {
+    torch::Tensor input, torch::Tensor index, int64_t minibatch_idx, int64_t num_threads) {
   TORCH_CHECK(!utils::is_on_gpu(index) && !utils::is_on_gpu(input));
-  return async([=] { return IndexSelect(input, index); });
+  return async([=] { return IndexSelect(input, index, minibatch_idx, num_threads); });
 }
 
 c10::intrusive_ptr<Future<torch::Tensor>> ScatterAsync(

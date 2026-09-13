@@ -82,7 +82,7 @@ def unique_and_compact(
         if async_op
         else torch.ops.graphbolt.unique_and_compact_batched
     )
-    results = unique_fn(concat_nodes, empties, empties, rank, world_size)
+    results = unique_fn(concat_nodes, empties, empties, rank, world_size, -1)
 
     class _Waiter:
         def __init__(self, future, ntypes, nums):
@@ -190,6 +190,10 @@ def unique_and_compact_csc_formats(
     rank: int = 0,
     world_size: int = 1,
     async_op: bool = False,
+    minibatch_idx: int = -1,
+    num_layers: int = 0,
+    layer_idx: int = -1,
+    pin_memory: bool = False,
 ):
     """
     Compact csc formats and return unique nodes (per type). The `rank` and
@@ -306,7 +310,7 @@ def unique_and_compact_csc_formats(
         if async_op
         else torch.ops.graphbolt.unique_and_compact_batched
     )
-    results = uniq_fn(indice_list, dst_list, unique_dst_list, rank, world_size)
+    results = uniq_fn(indice_list, dst_list, unique_dst_list, rank, world_size, minibatch_idx, num_layers, layer_idx, pin_memory)
 
     class _Waiter:
         def __init__(self, future, csc_formats):

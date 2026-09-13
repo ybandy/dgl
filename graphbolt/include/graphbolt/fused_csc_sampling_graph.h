@@ -361,7 +361,8 @@ class FusedCSCSamplingGraph : public torch::CustomClassHolder {
       bool returning_indices_is_optional,
       torch::optional<torch::Tensor> probs_or_mask,
       torch::optional<torch::Tensor> random_seed,
-      double seed2_contribution) const;
+      double seed2_contribution,
+      const bool pin_memory = false, const bool return_picked_eids = true) const;
 
   c10::intrusive_ptr<Future<c10::intrusive_ptr<FusedSampledSubgraph>>>
   SampleNeighborsAsync(
@@ -371,7 +372,42 @@ class FusedCSCSamplingGraph : public torch::CustomClassHolder {
       bool returning_indices_is_optional,
       torch::optional<torch::Tensor> probs_or_mask,
       torch::optional<torch::Tensor> random_seed,
-      double seed2_contribution) const;
+      double seed2_contribution,
+      const bool pin_memory = false, const bool return_picked_eids = true) const;
+
+
+  std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
+  SampleNeighborsAndCompact(
+      torch::Tensor seeds,
+      const std::vector<int64_t>& fanouts,
+      const bool pin_memory = false, const bool return_picked_eids = true) const;
+
+  std::vector<std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>>
+  SampleNeighborsAll(
+      torch::Tensor seeds,
+      const std::vector<int64_t>& fanouts,
+      const bool pin_memory = false, const bool return_picked_eids = true) const;
+
+  c10::intrusive_ptr<Future<
+      std::vector<std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>>>>
+  SampleNeighborsAllAsync(
+      torch::Tensor seeds,
+      const std::vector<int64_t>& fanouts,
+      const bool pin_memory = false, const bool return_picked_eids = true) const;
+
+  std::vector<std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>>
+  SampleNeighborsAll2(
+      torch::Tensor seeds,
+      const std::vector<int64_t>& fanouts,
+      const bool pin_memory = false, const bool return_picked_eids = true) const;
+
+  c10::intrusive_ptr<Future<
+      std::vector<std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>>>>
+  SampleNeighborsAllAsync2(
+      torch::Tensor seeds,
+      const std::vector<int64_t>& fanouts,
+      const bool pin_memory = false, const bool return_picked_eids = true) const;
+
 
   /**
    * @brief Sample neighboring edges of the given nodes with a temporal
@@ -460,7 +496,8 @@ class FusedCSCSamplingGraph : public torch::CustomClassHolder {
       const torch::Tensor& seeds,
       const torch::optional<std::vector<int64_t>>& seed_offsets,
       const std::vector<int64_t>& fanouts, NumPickFn num_pick_fn,
-      PickFn pick_fn) const;
+      PickFn pick_fn,
+      const bool pin_memory = false, const bool return_picked_eids = true) const;
 
   /** @brief CSC format index pointer array. */
   torch::Tensor indptr_;

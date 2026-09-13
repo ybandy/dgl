@@ -13,6 +13,8 @@
 #include <memory>
 #include <vector>
 
+#include "./utils.h"
+
 namespace graphbolt {
 namespace sampling {
 
@@ -82,6 +84,10 @@ class ConcurrentIdHashMap {
    * @param num_seeds The number of seed ids.
    */
   ConcurrentIdHashMap(const torch::Tensor& ids, size_t num_seeds);
+  ConcurrentIdHashMap() {};
+  //static ConcurrentIdHashMap *GetInstance();
+  const torch::Tensor& ConstructHashMap(const torch::Tensor& ids, size_t num_seeds, const bool pin_memory, size_t total_num_ids_expected=0);
+  const torch::Tensor& UpdateHashMap(const torch::Tensor& ids, const bool pin_memory);
 
   ConcurrentIdHashMap(const ConcurrentIdHashMap& other) = delete;
   ConcurrentIdHashMap& operator=(const ConcurrentIdHashMap& other) = delete;
@@ -98,7 +104,7 @@ class ConcurrentIdHashMap {
    *
    * @return Mapping results corresponding to `ids`.
    */
-  torch::Tensor MapIds(const torch::Tensor& ids) const;
+  torch::Tensor MapIds(const torch::Tensor& ids, const bool pin_memory = false) const;
 
  private:
   /**

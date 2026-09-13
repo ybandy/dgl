@@ -84,6 +84,15 @@ class FeatureFetcher(MiniBatchTransformer):
         eliminates duplicate work performed across the GPUs due to the
         overlapping sampled k-hop neighborhoods of seed nodes when performing
         GNN minibatching.
+    pin_memory_in_advance: bool, optional
+        If True, the feature fetcher will move the given minibatch to pinned memory
+        for faster GPU transfer after the fetch. The fetched feature will be pinned
+        irrespective of this setting, thus making sure the whole minibatch will be
+        pinned in the end before GPU transfer. This flag is effective only when
+        overlap_fetch is True. The pinning is performed asynchronously during
+        overlapped fetches so as to hide the latency of pinning. If the minibatch has
+        already been pinned in the neighbor sampling stage, this flag should be left
+        False, or otherwise it can add some overhead.
     """
 
     def __init__(
@@ -94,6 +103,8 @@ class FeatureFetcher(MiniBatchTransformer):
         edge_feature_keys=None,
         overlap_fetch=True,
         cooperative=False,
+        user_set_num_stages=None,
+        pin_memory_in_advance=False,
     ):
         datapipe = datapipe.mark_feature_fetcher_start()
         self.feature_store = feature_store
@@ -120,11 +131,18 @@ class FeatureFetcher(MiniBatchTransformer):
                             )
                         except AssertionError:
                             pass
+        if(user_set_num_stages is not None and max_val > user_set_num_stages):
+            print(f"max_val ({max_val}) exceeded user-set # stages ({user_set_num_stages}), overwritten")
+            max_val = user_set_num_stages
         datapipe = datapipe.transform(self._read)
+        if(max_val > 0 and pin_memory_in_advance):
+            datapipe = datapipe.transform(self._pin_memory_async)
         for i in range(max_val, 0, -1):
             datapipe = datapipe.transform(
                 partial(self._execute_stage, i)
             ).buffer(1)
+        if(max_val > 0 and pin_memory_in_advance):
+            datapipe = datapipe.transform(self._pin_memory_wait)
         if max_val > 0:
             datapipe = datapipe.transform(self._final_stage)
         if cooperative:
@@ -133,6 +151,31 @@ class FeatureFetcher(MiniBatchTransformer):
         super().__init__(datapipe)
         # A positive value indicates that the overlap optimization is enabled.
         self.max_num_stages = max_val
+
+    @staticmethod
+    def _pin_memory_async(data): # pin minibatch before feature fetch
+        tensors = [data.seeds, data.labels]
+        for s in data.sampled_subgraphs:
+            tensors += [s.sampled_csc.indptr, s.sampled_csc.indices, s.original_column_node_ids, s.original_row_node_ids]
+        data._pin_future = torch.ops.graphbolt.pin_memory_async(tensors)
+        return data
+
+    @staticmethod
+    def _pin_memory_wait(data): # pin minibatch before feature fetch
+        tensors = data._pin_future.wait()
+        data.seeds = tensors[0]
+        data.labels = tensors[1]
+        tid = 2
+        for s in data.sampled_subgraphs:
+            s.sampled_csc.indptr = tensors[tid]
+            s.sampled_csc.indices = tensors[tid+1]
+            s.original_column_node_ids = tensors[tid+2]
+            s.original_row_node_ids = tensors[tid+3]
+            tid += 4
+        delattr(data, "_pin_future")
+        delattr(data, "indexes")
+        delattr(data, "input_nodes")
+        return data
 
     @staticmethod
     def _execute_stage(current_stage, data):
@@ -203,14 +246,14 @@ class FeatureFetcher(MiniBatchTransformer):
             self.node_feature_keys, Dict
         ) or isinstance(self.edge_feature_keys, Dict)
         # Read Node features.
-        input_nodes = data.node_ids()
+        input_nodes = data.node_ids() # returns data.input_nodes (unique node IDs of the last hop)
 
-        def read_helper(feature_key, index):
+        def read_helper(feature_key, index, minibatch_idx=-1):
             if self.max_num_stages > 0:
                 feature = self.feature_store[feature_key]
                 num_stages = feature.read_async_num_stages(index.device)
                 if num_stages > 0:
-                    return (feature.read_async(index), num_stages)
+                    return (feature.read_async(index, minibatch_idx), num_stages)
                 else:  # Asynchronicity is not needed, compute in _final_stage.
 
                     class _Waiter:
@@ -229,7 +272,7 @@ class FeatureFetcher(MiniBatchTransformer):
             else:
                 domain, type_name, feature_name = feature_key
                 return self.feature_store.read(
-                    domain, type_name, feature_name, index
+                    domain, type_name, feature_name, index, minibatch_idx
                 )
 
         if self.node_feature_keys and input_nodes is not None:
@@ -243,8 +286,9 @@ class FeatureFetcher(MiniBatchTransformer):
                         )
             else:
                 for feature_name in self.node_feature_keys:
+                    minibatch_idx = data.minibatch_idx if hasattr(data, 'minibatch_idx') else -1
                     node_features[feature_name] = read_helper(
-                        ("node", None, feature_name), input_nodes
+                        ("node", None, feature_name), input_nodes, minibatch_idx,
                     )
         # Read Edge features.
         if self.edge_feature_keys and num_layers > 0:

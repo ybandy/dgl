@@ -48,7 +48,7 @@ std::tuple<torch::Tensor, torch::Tensor> IndexSelectCSC(
  * @param index Index tensor with shape (M,).
  * @return torch::Tensor Output tensor with shape (M, ...).
  */
-torch::Tensor IndexSelect(torch::Tensor input, torch::Tensor index);
+torch::Tensor IndexSelect(torch::Tensor input, torch::Tensor index, int64_t minibatch_idx = -1, int64_t num_threads = 0);
 
 /**
  * @brief The async version of IndexSelect, available for only CPU tensors.
@@ -56,7 +56,7 @@ torch::Tensor IndexSelect(torch::Tensor input, torch::Tensor index);
  * @return Returns a future containing a torch::Tensor.
  */
 c10::intrusive_ptr<Future<torch::Tensor>> IndexSelectAsync(
-    torch::Tensor input, torch::Tensor index);
+    torch::Tensor input, torch::Tensor index, int64_t minibatch_idx = -1, int64_t num_threads = 0);
 
 /**
  * @brief The async version of operation input[index] = src.

@@ -6,6 +6,7 @@
 
 #include <graphbolt/cuda_sampling_ops.h>
 #include <graphbolt/fused_csc_sampling_graph.h>
+#include <graphbolt/unique_and_compact.h>
 #include <graphbolt/serialize.h>
 #include <torch/torch.h>
 
@@ -20,6 +21,7 @@
 
 #include "./expand_indptr.h"
 #include "./index_select.h"
+#include "./concurrent_id_hash_map.h"
 #include "./macro.h"
 #include "./random.h"
 #include "./shared_memory_helper.h"
@@ -484,8 +486,10 @@ c10::intrusive_ptr<FusedSampledSubgraph>
 FusedCSCSamplingGraph::SampleNeighborsImpl(
     const torch::Tensor& seeds,
     const torch::optional<std::vector<int64_t>>& seed_offsets,
-    const std::vector<int64_t>& fanouts, NumPickFn num_pick_fn,
-    PickFn pick_fn) const {
+    const std::vector<int64_t>& fanouts,
+    NumPickFn num_pick_fn,
+    PickFn pick_fn,
+    const bool pin_memory, const bool return_picked_eids) const {
   const int64_t num_seeds = seeds.size(0);
   const auto indptr_options = indptr_.options();
 
@@ -544,9 +548,14 @@ FusedCSCSamplingGraph::SampleNeighborsImpl(
   // equals to sum_{etype} #seeds with ntype=dst_type(etype). In homo sampling,
   // it equals to `num_seeds`.
   const int64_t num_rows = etype_id_to_num_picked_offset[num_etypes];
-  torch::Tensor num_picked_neighbors_per_node =
-      // Need to use zeros because all nodes don't have all etypes.
-      torch::zeros({num_rows}, indptr_options);
+  //torch::Tensor num_picked_neighbors_per_node =
+  //    // Need to use zeros because all nodes don't have all etypes.
+  //    torch::zeros({num_rows}, indptr_options);
+  if(pin_memory) {
+    subgraph_indptr = torch::zeros({num_rows}, indptr_options.pinned_memory(true));
+  } else {
+    subgraph_indptr = torch::zeros({num_rows}, indptr_options);
+  }
 
   AT_DISPATCH_INDEX_TYPES(
       indptr_.scalar_type(), "SampleNeighborsImplWrappedWithIndptr", ([&] {
@@ -556,7 +565,8 @@ FusedCSCSamplingGraph::SampleNeighborsImpl(
               using seeds_t = index_t;
               const auto indptr_data = indptr_.data_ptr<indptr_t>();
               const auto num_picked_neighbors_data_ptr =
-                  num_picked_neighbors_per_node.data_ptr<indptr_t>();
+                  //num_picked_neighbors_per_node.data_ptr<indptr_t>();
+                  subgraph_indptr.data_ptr<indptr_t>();
               num_picked_neighbors_data_ptr[0] = 0;
               const auto seeds_data_ptr = seeds.data_ptr<seeds_t>();
 
@@ -602,8 +612,9 @@ FusedCSCSamplingGraph::SampleNeighborsImpl(
 
               // Step 2. Calculate prefix sum to get total length and offsets of
               // each node. It's also the indptr of the generated subgraph.
-              subgraph_indptr = num_picked_neighbors_per_node.cumsum(
-                  0, indptr_.scalar_type());
+              //subgraph_indptr = num_picked_neighbors_per_node.cumsum(
+              //    0, indptr_.scalar_type());
+              subgraph_indptr.cumsum_(0, indptr_.scalar_type()); // in-place version
               auto subgraph_indptr_data_ptr =
                   subgraph_indptr.data_ptr<indptr_t>();
 
@@ -646,7 +657,11 @@ FusedCSCSamplingGraph::SampleNeighborsImpl(
               // Step 3. Allocate the tensor for picked neighbors.
               const auto total_length =
                   subgraph_indptr.data_ptr<indptr_t>()[num_rows - 1];
-              picked_eids = torch::empty({total_length}, indptr_options);
+              if(pin_memory && return_picked_eids) {
+                picked_eids = torch::empty({total_length}, indptr_options.pinned_memory(true));
+              } else {
+                picked_eids = torch::empty({total_length}, indptr_options);
+              }
               subgraph_indices =
                   torch::empty({total_length}, indices_.options());
               if (!hetero_with_seed_offsets && type_per_edge_.has_value()) {
@@ -692,13 +707,13 @@ FusedCSCSamplingGraph::SampleNeighborsImpl(
                             offset, num_neighbors, picked_eids_data_ptr,
                             seed_index, subgraph_indptr_data_ptr,
                             etype_id_to_num_picked_offset);
-                        if (!hetero_with_seed_offsets) {
-                          TORCH_CHECK(
-                              num_picked_neighbors_data_ptr[i + 1] ==
-                                  picked_number,
-                              "Actual picked count doesn't match the calculated"
-                              " pick number.");
-                        }
+                        //if (!hetero_with_seed_offsets) {
+                        //  TORCH_CHECK(
+                        //      num_picked_neighbors_data_ptr[i + 1] ==
+                        //          picked_number,
+                        //      "Actual picked count doesn't match the calculated"
+                        //      " pick number.");
+                        //} // this check doesn't work if it is in-place cumsum_'d
                       }
 
                       // Step 5. Calculate other attributes and return the
@@ -771,6 +786,11 @@ FusedCSCSamplingGraph::SampleNeighborsImpl(
     subgraph_indptr -= subgraph_indptr_substract.value();
   }
 
+  if(!return_picked_eids) {
+    return c10::make_intrusive<FusedSampledSubgraph>(
+        subgraph_indptr, subgraph_indices, torch::empty(0), seeds, torch::nullopt,
+        subgraph_type_per_edge, edge_offsets);
+  }
   return c10::make_intrusive<FusedSampledSubgraph>(
       subgraph_indptr, subgraph_indices, picked_eids, seeds, torch::nullopt,
       subgraph_type_per_edge, edge_offsets);
@@ -783,7 +803,8 @@ c10::intrusive_ptr<FusedSampledSubgraph> FusedCSCSamplingGraph::SampleNeighbors(
     bool returning_indices_is_optional,
     torch::optional<torch::Tensor> probs_or_mask,
     torch::optional<torch::Tensor> random_seed,
-    double seed2_contribution) const {
+    double seed2_contribution,
+    const bool pin_memory, const bool return_picked_eids) const {
   // If seeds does not have a value, then we expect all arguments to be resident
   // on the GPU. If seeds has a value, then we expect them to be accessible from
   // GPU. This is required for the dispatch to work when CUDA is not available.
@@ -837,7 +858,8 @@ c10::intrusive_ptr<FusedSampledSubgraph> FusedCSCSamplingGraph::SampleNeighbors(
               with_seed_offsets),
           GetPickFn(
               fanouts, replace, indptr_.options(), type_per_edge_,
-              probs_or_mask, with_seed_offsets, args));
+              probs_or_mask, with_seed_offsets, args),
+          pin_memory, return_picked_eids);
     } else {
       auto args = [&] {
         if (random_seed.has_value() && random_seed->numel() == 1) {
@@ -858,7 +880,8 @@ c10::intrusive_ptr<FusedSampledSubgraph> FusedCSCSamplingGraph::SampleNeighbors(
               with_seed_offsets),
           GetPickFn(
               fanouts, replace, indptr_.options(), type_per_edge_,
-              probs_or_mask, with_seed_offsets, args));
+              probs_or_mask, with_seed_offsets, args),
+          pin_memory, return_picked_eids);
     }
   } else {
     SamplerArgs<SamplerType::NEIGHBOR> args;
@@ -868,7 +891,8 @@ c10::intrusive_ptr<FusedSampledSubgraph> FusedCSCSamplingGraph::SampleNeighbors(
             fanouts, replace, type_per_edge_, probs_or_mask, with_seed_offsets),
         GetPickFn(
             fanouts, replace, indptr_.options(), type_per_edge_, probs_or_mask,
-            with_seed_offsets, args));
+            with_seed_offsets, args),
+        pin_memory, return_picked_eids);
   }
 }
 
@@ -880,16 +904,159 @@ FusedCSCSamplingGraph::SampleNeighborsAsync(
     bool returning_indices_is_optional,
     torch::optional<torch::Tensor> probs_or_mask,
     torch::optional<torch::Tensor> random_seed,
-    double seed2_contribution) const {
+    double seed2_contribution,
+    const bool pin_memory, const bool return_picked_eids) const {
   return async(
       [=] {
         return this->SampleNeighbors(
             seeds, seed_offsets, fanouts, replace, layer,
             returning_indices_is_optional, probs_or_mask, random_seed,
-            seed2_contribution);
+            seed2_contribution, pin_memory, return_picked_eids);
       },
       (seeds.has_value() && utils::is_on_gpu(*seeds)) ||
           utils::is_on_gpu(indptr_));
+}
+
+
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
+FusedCSCSamplingGraph::SampleNeighborsAndCompact(
+    torch::Tensor seeds,
+    const std::vector<int64_t>& fanouts,
+    const bool pin_memory, const bool return_picked_eids) const {
+
+  SamplerArgs<SamplerType::NEIGHBOR> args;
+  c10::intrusive_ptr<FusedSampledSubgraph> subgraph =
+    SampleNeighborsImpl<TemporalOption::NOT_TEMPORAL>(
+      seeds,
+      torch::nullopt, // seed_offsets
+      fanouts,
+      GetNumPickFn(
+        fanouts,
+        false, // replace
+        type_per_edge_,
+        torch::nullopt, // probs_or_mask
+        false), // with_seed_offsets
+      GetPickFn(
+        fanouts,
+        false, // replace
+        indptr_.options(),
+        type_per_edge_,
+        torch::nullopt, // probs_or_mask
+        false, // with_seed_offsets
+        args),
+      pin_memory,
+      return_picked_eids);
+
+  torch::Tensor dummy = torch::empty(0);
+  auto ret = UniqueAndCompact(
+    subgraph->indices.value(), // src_ids
+    dummy, // dst_ids
+    seeds, // unique_dst_ids,
+    0, // rank,
+    1, // world_size,
+    -1, // minibatch_idx
+    0, // num_layers
+    0, // layer_idx
+    pin_memory);
+
+  auto unique_ids = std::get<0>(ret); // unique_nodes, to be next-layer seeds
+  auto compacted_src = std::get<1>(ret); // compacted_indices
+  return {subgraph->indptr, subgraph->original_edge_ids, unique_ids, compacted_src};
+}
+
+
+std::vector<std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>>
+FusedCSCSamplingGraph::SampleNeighborsAll(
+    torch::Tensor seeds,
+    const std::vector<int64_t>& fanouts,
+    const bool pin_memory, const bool return_picked_eids) const {
+
+  std::vector<std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>> results;
+  for(auto it = fanouts.rbegin(); it != fanouts.rend(); it++) {
+    std::vector<int64_t> f(1, *it);
+    auto ret = SampleNeighborsAndCompact(seeds, f, pin_memory, return_picked_eids);
+    results.emplace_back(ret);
+    seeds = std::get<2>(ret); // unique_ids
+  }
+  return results;
+}
+
+c10::intrusive_ptr<Future<
+    std::vector<std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>>>>
+FusedCSCSamplingGraph::SampleNeighborsAllAsync(
+    torch::Tensor seeds,
+    const std::vector<int64_t>& fanouts,
+    const bool pin_memory, const bool return_picked_eids) const {
+  return async([=] { return SampleNeighborsAll(seeds, fanouts, pin_memory, return_picked_eids); });
+}
+
+std::vector<std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>>
+FusedCSCSamplingGraph::SampleNeighborsAll2(
+    torch::Tensor seeds,
+    const std::vector<int64_t>& fanouts,
+    const bool pin_memory, const bool return_picked_eids) const {
+
+  std::vector<std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>> ret;
+  ret = AT_DISPATCH_INDEX_TYPES(
+      seeds.scalar_type(), "sample_neighbors_all2", ([&] {
+
+        std::vector<std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>> results;
+        ConcurrentIdHashMap<index_t> id_map;
+        size_t total_num_ids_expected = seeds.size(0);
+        for(auto f : fanouts) total_num_ids_expected *= f;
+        bool first = true;
+
+        for(auto it = fanouts.rbegin(); it != fanouts.rend(); it++) {
+          std::vector<int64_t> f(1, *it);
+          SamplerArgs<SamplerType::NEIGHBOR> args;
+          c10::intrusive_ptr<FusedSampledSubgraph> subgraph =
+            SampleNeighborsImpl<TemporalOption::NOT_TEMPORAL>(
+              seeds,
+              torch::nullopt, // seed_offsets
+              f,
+              GetNumPickFn(
+                f,
+                false, // replace
+                type_per_edge_,
+                torch::nullopt, // probs_or_mask
+                false), // with_seed_offsets
+              GetPickFn(
+                f,
+                false, // replace
+                indptr_.options(),
+                type_per_edge_,
+                torch::nullopt, // probs_or_mask
+                false, // with_seed_offsets
+                args),
+              pin_memory,
+              return_picked_eids);
+
+          torch::Tensor unique_ids;
+          if(first) {
+            torch::Tensor ids = torch::cat({seeds, subgraph->indices.value()});
+            unique_ids = id_map.ConstructHashMap(ids, seeds.size(0), pin_memory, total_num_ids_expected);
+            first = false;
+          } else {
+            unique_ids = id_map.UpdateHashMap(subgraph->indices.value(), pin_memory);
+          }
+          results.emplace_back(subgraph->indptr, subgraph->original_edge_ids, unique_ids, subgraph->indices.value());
+          seeds = unique_ids;
+        }
+
+        for(auto &r : results) std::get<3>(r) = id_map.MapIds(std::get<3>(r), pin_memory);
+        return results;
+      }));
+  
+  return ret;
+}
+
+c10::intrusive_ptr<Future<
+    std::vector<std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>>>>
+FusedCSCSamplingGraph::SampleNeighborsAllAsync2(
+    torch::Tensor seeds,
+    const std::vector<int64_t>& fanouts,
+    const bool pin_memory, const bool return_picked_eids) const {
+  return async([=] { return SampleNeighborsAll2(seeds, fanouts, pin_memory, return_picked_eids); });
 }
 
 c10::intrusive_ptr<FusedSampledSubgraph>
